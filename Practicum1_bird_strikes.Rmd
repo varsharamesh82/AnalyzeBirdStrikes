@@ -1,0 +1,517 @@
+---
+title: "Practicum I - Design & Implement a Relational Database on Bird Strikes on Aircraft"
+output: html_notebook
+author1: Name - Saroj Agrawal, Email - agrawal.saro@northeastern.edu, NUID - 002966619
+author2: Name - Varsha Ramesh, Email - ramesh.var@northeastern.edu, NUID - 002979100
+---
+
+# 1.0 CONNECTING TO THE AWS DATABASE
+
+```{r}
+# 1. Library
+library(RMySQL)
+
+# 2. Settings
+db_user <- 'admin'
+db_password <- 'Welcome123'
+db_name <- 'Practicum1'
+db_host <- 'cs5200-dbs.cylccrkwyet2.us-east-1.rds.amazonaws.com' # AWS Host
+db_port <- 3306
+
+# 3. Read data from db
+mydb <-  dbConnect(MySQL(), user = db_user, password = db_password,
+                 dbname = db_name, host = db_host, port = db_port)
+```
+
+
+# 2.0 CREATING TABLES
+
+## 2.1 Dropping tables
+
+We will need to create 3 tables - Airports, Condtions and Incidents. We will drop these tables first if they exists.
+
+```{sql connection=mydb}
+DROP TABLE IF EXISTS Incidents;
+
+```
+
+```{sql connection=mydb}
+DROP TABLE IF EXISTS Airports;
+
+```
+
+```{sql connection=mydb}
+DROP TABLE IF EXISTS Conditions;
+
+```
+
+
+## 2.1 Create a table that stores airports and states called airports(aid, airportName, airportCode, state). aid is a synthetic primary key, airportName and state are the airport name and state from the data file.
+
+```{sql connection=mydb}
+CREATE TABLE Airports (aid INT NOT NULL AUTO_INCREMENT,
+                       airportname VARCHAR(30),
+                       airportcode VARCHAR(10),
+                       state VARCHAR(30),
+                       PRIMARY KEY(aid)
+                       )
+```
+
+
+## 2.3 Create a lookup table conditions(cid, condition, explanation) and link this lookup table to the incidents table with the conditions foreign key. This table contains the value of all conditions, e.g., 'Overcast'. Leave the explanation column empty (future expansion).
+
+```{sql connection=mydb}
+CREATE TABLE Conditions (cid INT NOT NULL AUTO_INCREMENT,
+                         `condition` VARCHAR(20),
+                         explanation VARCHAR(80),
+                         PRIMARY KEY(cid)
+                         )
+```
+
+
+## 2.4 Create a table that stores wildlife strike incidents called incidents(rid, date, origin, airline, aircraft, flightPhase, altitude, conditions, warning). Only store the date, not the time of the incident. Make 'warning' a Boolean flag and use TRUE if the pilot was warned, FALSE otherwise.
+
+```{sql connection=mydb}
+CREATE TABLE Incidents (rid INT PRIMARY KEY, 
+                        flightdate DATE, 
+                        origin INT,
+                        airline VARCHAR(30),
+                        aircraft VARCHAR(30),
+                        flightphase ENUM('takeoff', 'landing', 'inflight', 'unknown') NOT NULL,
+                        altitude INT,
+                        conditions INT,
+                        warning BOOLEAN,
+                        FOREIGN KEY (origin) REFERENCES Airports(aid),
+                        FOREIGN KEY (conditions) REFERENCES Conditions(cid)
+                        );
+```
+
+
+```{sql connection=mydb}
+#Displaying all the tables in the database
+SHOW TABLES;
+
+```
+
+
+# 3.0 LOADING DATA
+
+## 3.1 Loading the .csv file
+
+```{r loadcsv}
+df.raw <- read.csv("BirdStrikesData-V2.csv", header = TRUE, stringsAsFactors = FALSE, strip.white = TRUE)
+
+paste("Number of columns in the dataframe: ", ncol(df.raw))
+paste("Number of columns in the dataframe: ", nrow(df.raw))
+
+```
+
+
+## 3.2 Let's clean the data
+
+```{r}
+# Remove records (rows) that do not have flight information.
+df.raw <- df.raw[!(df.raw$airline==""),]
+
+# Remove all military flights from the database.
+df.raw <- df.raw[!grepl("military",df.raw$airline, ignore.case=TRUE),]
+
+paste("Number of columns in the dataframe: ", ncol(df.raw))
+paste("Number of columns in the dataframe: ", nrow(df.raw))
+
+
+```
+
+
+## 3.3 Create Dataframes
+
+The strategy we will use to load the data from the CSV to the database is to create internal data frames that mirror the tables in the database and then write the data frames to the database. So we will create 3 data frames - **Airports**, **Conditions** and **Incidents**.
+
+
+### 3.3.1 Creating dataframe 'Airports'
+We will need to find the unique set of airports, so we will remove duplicates, any blank strings, etc. Also add a synthetic key column in the data frame.
+
+```{r extractairportdata}
+
+df.airports <- df.raw[,c("airport", "origin")]
+
+#remove duplicates, NA values and blank values.
+df.airports <- df.airports[!duplicated(df.airports), ]
+
+paste("Number of columns in the dataframe: ", ncol(df.airports))
+paste("Number of columns in the dataframe: ", nrow(df.airports))
+
+
+```
+
+
+#### Let's check if there is any blank or null values in the airportName column
+```{r}
+
+any(is.na(df.airports))
+
+```
+
+
+#### Let's further make some changes - add airport ID, airport code and rearrange the columns
+
+```{r}
+#add 'aid' column
+df.airports$aid <- seq.int(nrow(df.airports))
+
+#renaming the column names
+colnames(df.airports) <- c('airportName','state','aid')
+
+#add 'airportCode' column
+df.airports <- cbind(df.airports,airportCode="")
+
+#rearranging column names
+df.airports <- df.airports[,c(3,1,4,2)]
+
+#display the data frame
+df.airports
+```
+
+### 3.3.2 Creating dataframe 'Conditions'
+We will need to find the unique set of conditions, so we will remove duplicates, any blank strings, etc. Also add a synthetic key column in the data frame.
+
+```{r extractconditiondata}
+# create a data frame
+df.conditions <- data.frame(condition = c(df.raw[,c("sky_conditions")]))
+
+#remove duplicates.
+df.conditions <- data.frame(condition = df.conditions[!duplicated(df.conditions$condition), ])
+
+#adding cid column
+df.conditions <- tibble::rowid_to_column(df.conditions, "cid")
+
+#add 'explanation' column
+df.conditions <- cbind(df.conditions, explanation="")
+
+df.conditions
+
+```
+
+
+### 3.3.2 Creating dataframe 'Incidents'
+
+```{r extractincidentdata}
+
+# create a data frame
+df.incidents <- data.frame(rid = c(df.raw[,c("rid")]),
+                           flightdate = c(df.raw[,c("flight_date")]),
+                           origin = c(df.raw[,c("origin")]),
+                           airline = c(df.raw[,c("airline")]),
+                           aircraft = c(df.raw[,c("aircraft")]),
+                           flightphase = c(df.raw[,c("flight_phase")]),
+                           altitude = c(df.raw[,c("altitude_ft")]),
+                           conditions = c(df.raw[,c("sky_conditions")]),
+                           warning = c(df.raw[,c("pilot_warned_flag")]))
+
+colnames(df.incidents)
+df.incidents
+```
+
+
+#### Let's now clean up and process the data in the incidents data frame.
+```{r}
+
+#convert the flight date column into date
+df.incidents$flightdate = as.Date(df.incidents$flightdate, format = "%m/%d/%Y")
+
+# change warning flag to TRUE and FALSE
+df.incidents$warning[df.incidents$warning == "N"] <- "FALSE"
+df.incidents$warning[df.incidents$warning == "Y"] <- "TRUE"
+
+# change the conditions as per our conditions table
+df.incidents$conditions[df.incidents$conditions == "No Cloud"] <- 1
+df.incidents$conditions[df.incidents$conditions == "Some Cloud"] <- 2
+df.incidents$conditions[df.incidents$conditions == "Overcast"] <- 3
+
+df.incidents
+```
+
+
+```{r}
+unique(df.incidents$flightphase)
+```
+
+
+#### Now, we will harmonize the flight phases to be one of: takeoff, landing, inflight, unknown. 
+```{r}
+
+df.incidents$flightphase[df.incidents$flightphase == "Climb"] <-"inflight"
+df.incidents$flightphase[df.incidents$flightphase == "Landing Roll"] <-"landing"
+df.incidents$flightphase[df.incidents$flightphase == "Approach"] <-"landing"
+df.incidents$flightphase[df.incidents$flightphase == "Take-off run"] <-"takeoff"
+df.incidents$flightphase[df.incidents$flightphase == "Descent"] <-"landing"
+df.incidents$flightphase[df.incidents$flightphase == "Taxi"] <-"unknown"
+df.incidents$flightphase[df.incidents$flightphase == "Parked"] <-"unknown"
+
+unique(df.incidents$flightphase)
+```
+
+
+#### Now let's check if the data frame has any missing, NA, null or duplicated values
+```{r}
+paste("The NA values in Incidents dataframe is",any(is.na(df.incidents)))
+
+paste("The duplicated values in Incidents dataframe is",anyDuplicated(df.incidents))
+
+paste("The null values in Incidents dataframe is", any(is.null(df.incidents)))
+
+```
+
+
+#### Let's replace the "origin" column in df.Incidents with "aid" from df.airports 
+```{r}
+df.incidents$origin <- df.airports$aid[match(df.incidents$origin, df.airports$state)]
+
+df.incidents
+
+```
+
+
+### 3.4 Loading the data from dataframes to MySql tables
+
+```{r}
+dbWriteTable(mydb, "Conditions", df.conditions, overwrite = F, append = T, row.names = F);
+
+```
+
+
+```{r}
+dbWriteTable(mydb, "Airports", df.airports, overwrite = F, append = T, row.names = F);
+```
+
+
+```{r}
+dbWriteTable(mydb, "Incidents", df.incidents, overwrite = F, append = T, row.names = F);
+
+```
+
+
+# 4.0 DISPLAYING THE DATA FROM THE TABLES
+
+```{r}
+sqlStmt <- "SELECT * FROM Conditions;"
+result = dbGetQuery(conn=mydb,sqlStmt)
+print(result)
+
+```
+
+
+```{r}
+
+sqlStmt <- "SELECT * FROM Airports LIMIT 50;"
+result = dbGetQuery(conn=mydb,sqlStmt)
+print(result)
+
+```
+
+
+```{r}
+sqlStmt <- "SELECT * FROM Incidents LIMIT 50;"
+result = dbGetQuery(conn=mydb,sqlStmt)
+print(result)
+
+```
+
+
+```{r}
+
+sqlStmt <- "SELECT COUNT(*) FROM Incidents;"
+result = dbGetQuery(conn=mydb,sqlStmt)
+print(result)
+
+```
+
+
+# 5.0 WRITING SQL QUERIES
+
+## 5.1 Create a SQL query against your database to find the 10 airlines with the greatest number of incidents.
+```{r}
+
+sqlStmt <- "SELECT 
+  airline, COUNT(rid) as Number_of_incidents
+FROM
+  Incidents
+GROUP BY 
+  airline
+ORDER BY 
+  Number_of_incidents desc
+LIMIT 10;"
+result = dbGetQuery(conn=mydb,sqlStmt)
+print(result)
+
+```
+
+
+## 5.2 Create a SQL query against your database to find the flight phase that had an above average number bird strike incidents (during any flight phase).
+```{r}
+
+drop = dbExecute(conn = mydb, statement = "DROP VIEW v_flightPhase;")
+
+sqlcreateView <- "CREATE VIEW v_flightPhase AS 
+                  SELECT 
+                    flightPhase, COUNT(*) AS noOfIncidents
+                  FROM
+                    Incidents
+                  GROUP BY 
+                    flightPhase;"
+
+result1 <- dbExecute(conn = mydb, statement = sqlcreateView)
+
+sqlStmt <- "SELECT * FROM 
+              v_flightPhase 
+            WHERE
+              noOfIncidents > (SELECT AVG(noOfIncidents) FROM v_flightPhase);"
+
+result2 <- dbGetQuery(conn = mydb, statement = sqlStmt)
+
+print(result2)
+
+```
+
+
+## 5.3 Create a SQL query against your database to find the number of bird strike incidents by month (across all years). Include all airlines and all flights. 
+```{r}
+ 
+sqlStmt <- "SELECT EXTRACT(month FROM flightdate) AS month, count(rid) as number_of_incidents
+FROM Incidents
+GROUP BY month
+ORDER BY month ASC;"
+result = dbGetQuery(conn=mydb,sqlStmt)
+print(result)
+
+```
+
+# 6.0 BUILDING CHARTS
+
+## 6.1 Build a line chart that visualizes the number of bird strikes incidents per year from 2005 to 2011. Adorn the graph with appropriate axis labels, titles, legend, data labels, etc.
+
+##### First finding the bird strikes per year > 2004 using sql command
+```{r}
+
+sqlStmt <- "SELECT EXTRACT(year FROM flightdate) AS year, count(rid) as number_of_incidents
+FROM Incidents
+GROUP BY year
+ORDER BY year asc;"
+
+birdStrikeByYear = dbGetQuery(conn=mydb,sqlStmt)
+birdStrikeByYear <- subset(birdStrikeByYear, year>2004)
+print(birdStrikeByYear)
+
+```
+
+
+#### Next, plotted the values in r
+```{r}
+# Data
+x <- birdStrikeByYear$number_of_incidents
+y <- birdStrikeByYear$year
+
+# plotting the line chart
+plot(x, y, type = "l", 
+     xlab ="Number of bird strike incidents", 
+     ylab = "Years", 
+     col.lab = "blue", 
+     main = "Number of bird incidents vs Years (2005 - 2011)"
+     )
+```
+
+
+# 7.0 WRITING STORED PROCEDURE
+
+## 7.1 Create a stored procedure in MySQL that adds a new incident to the database. You may decide what you need to pass to the stored procedure to add a bird strike incident and you must account for there being potentially a new airport. After insertion, show (in R) that your procedure worked.
+
+```{sql connection=mydb}
+DROP PROCEDURE IF EXISTS insert_new_incident;
+
+```
+
+
+```{sql connection=mydb}
+CREATE PROCEDURE insert_new_incident
+                        (IN rid INT, 
+                        IN flightdate DATE, 
+                        IN origin INT,
+                        IN airline VARCHAR(30),
+                        IN aircraft VARCHAR(30),
+                        IN flightphase ENUM('takeoff', 'landing', 'inflight', 'unknown'),
+                        IN altitude INT,
+                        IN conditions INT,
+                        IN warning BOOLEAN,
+                        IN airportname VARCHAR(30),
+                        IN airportcode VARCHAR(10),
+                        IN state VARCHAR(30))
+BEGIN
+
+IF origin NOT IN (SELECT aid FROM Airports) THEN
+INSERT INTO Airports (aid, airportName, airportCode, state) VALUES (origin, airportname, airportcode, state);
+END IF;
+
+INSERT INTO Incidents (rid, flightdate, origin, airline, aircraft, flightphase, altitude, conditions, warning)
+VALUES (rid, flightdate, origin, airline, aircraft, flightphase, altitude, conditions, warning);
+
+END
+```
+
+
+# 8.0 TESTING
+
+## 8.1 Testing the stored procedure
+
+### TEST 1: We will try to call the stored procedure by passing the values where "origin" exists in the "Airports" table
+```{sql connection=mydb}
+
+CALL insert_new_incident(30001, 10/05/2022, 5, "Southwest Airlines", "B-737-700", "landing", 15000, 1, "TRUE","Boston Logan","BOS","Massachusetts")
+
+```
+
+#### TEST 1 RESULTS - PASSED: proof that the stored procedure successfully inserted the tuple into the "Incidents" table
+```{sql connection=mydb}
+
+SELECT * from Incidents where rid = 30001
+```
+
+#### TEST 1 RESULTS - PASSED: We tried to pass "Boston Logan", "Bos" and "Massachusetts" in the procedure call. Below is the proof that the stored procedure did not update the "Airports" table with the data passed in the stored procedure as origin=5 already existed in the "Airports" table
+```{sql connection=mydb}
+
+SELECT * from Airports where aid = 5
+```
+
+
+### TEST 2: We will try to call the stored procedure by passing the values where "origin" DOES NOT exist in the "Airports" table. Example here aid = 2000 does not exist in the "Airports" table
+```{sql connection=mydb}
+
+CALL insert_new_incident(30002, 10/05/2022, 2000, "Southwest Airlines", "B-737-700", "landing", 15000, 1, "TRUE","Boston Logan","BOS","Massachusetts")
+
+```
+
+#### TEST 2 RESULTS - PASSED: proof that the stored procedure successfully inserted the tuple into the "Incidents" table
+```{sql connection=mydb}
+
+SELECT * from Incidents where rid = 30002
+
+```
+
+#### TEST 2 RESULTS - PASSED: We tried to pass "Boston Logan", "Bos" and "Massachusetts" in the procedure call. Below is the proof that the stored procedure successfully inserted the tuple into the "Airports" table with these values.
+
+```{sql connection=mydb}
+
+SELECT * from Airports where aid = 2000
+
+```
+
+
+#### Disconnecting from the database
+```{r}
+dbDisconnect(mydb)
+```
+
+
+
+
+
+
